@@ -5,6 +5,16 @@ from binaryninja.enums          import SegmentFlag, SectionSemantics, SymbolType
 from binaryninja.log            import log_error, log_info
 from struct                     import *
 
+U8_MAX  = 0xFF
+U16_MAX = 0xFFFF
+U32_MAX = 0xFFFFFFFF
+U64_MAX = 0xFFFFFFFFFFFFFFFF
+
+LE_BYTE  = '<B'
+LE_SHORT = '<H'
+LE_INT   = '<I'
+LE_LONG  = '<Q'
+
 class GenericBinary(BinaryView):
     MAGIC = ''
     HDR_SIZE = 0
@@ -48,10 +58,10 @@ class GenericBinary(BinaryView):
         return value // 0x1000 * 0x1000
     
     def page_pad(self, binary):
-        return binary.ljust(self.page_align_up(len(binary)), b'\x00')
+        return binary + b'\x00' * (self.page_align_up(len(binary)) - len(binary))
 
     def generic_read(self, data, size, offset, raw=False):
-        SIZE_MAP = { 1: '<B', 2: '<H', 4: '<I', 8: '<Q' }
+        SIZE_MAP = { 1: LE_BYTE, 2: LE_SHORT, 4: LE_INT, 8: LE_LONG }
         ret = ''
         if raw:
             ret = data[offset:offset + size]
@@ -70,18 +80,31 @@ class GenericBinary(BinaryView):
         self.hdr_read_offset += size
         return self.generic_read(self.hdr, size, self.hdr_read_offset - size, raw)
     
+    def hdr_write(self, size, offset, value):
+        b = b''
+        if type(value) == int:
+            SIZE_MAP = { 1: LE_BYTE, 2: LE_SHORT, 4: LE_INT, 8: LE_LONG }
+            b = pack(SIZE_MAP[size], value)
+        else:
+            raise Exception("Invalid type for hdr_write")
+        tmp = list(self.hdr)
+        tmp[offset:offset + size] = list(b)
+        self.hdr = bytes(tmp)
+
     def init(self):
         log_info(f'[biNNja] Loading {self.name} {self.app_name}')
 
         self.platform = Architecture[self.ARCH].standalone_platform
 
-        mod_offset = self.generic_read(self.binary, 4, 4)
+        mod_offset = self.HDR_SIZE + self.generic_read(self.raw, 4, self.HDR_SIZE + 4)
 
-        if self.generic_read(self.binary, 4, mod_offset, raw=True).decode('ascii') != 'MOD0':
-            log_error(f'MOD0(@ {hex(mod_offset)}) Magic invalid')
-            return False
+        if self.generic_read(self.raw, 4, mod_offset, raw=True).decode('ascii') != 'MOD0':
+            log_info(f'[biNNja] MOD0(@ {hex(mod_offset)}) Magic invalid')
+        else:
+            # TODO: Get Symbols
+            log_info('[biNNja] Parsing MOD0')
 
-        offset = 0
+        offset = self.HDR_SIZE
         log_info(f'[biNNja] Mapping .text {hex(self.text_offset)}-{hex(self.text_offset + self.text_size)}')
         self.add_user_segment(self.text_offset, self.text_size, offset, self.text_size, SegmentFlag.SegmentExecutable | SegmentFlag.SegmentReadable)
         self.add_user_section('.text', self.text_offset, self.text_size, SectionSemantics.ReadOnlyCodeSectionSemantics)
