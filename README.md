@@ -10,6 +10,7 @@ Work In Progress Binary Ninja Loader for common Nintendo Switch binaries
 
 ## Installation Instructions
 
+Install all needed packages from pip in requirements.txt (Windows and MacOS Binja ship with an embedded python, [read here on how to install pip packages](https://docs.binary.ninja/guide/plugins.html#installing-prerequisites))
 ### Windows
 
 Clone this repository into `%APPDATA%/Binary Ninja/plugins/`

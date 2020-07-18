@@ -16,7 +16,7 @@
 		"Windows" : ""
 	},
 	"dependencies": {
-		"pip": [],
+		"pip": ["lz4"],
 		"apt": [],
 		"installers": [],
 		"other": []

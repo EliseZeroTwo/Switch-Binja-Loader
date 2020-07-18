@@ -66,8 +66,7 @@ class KIPView(GenericBinary):
     
 
     def __init__(self, data):
-        self.raw = data
-        self.init_common()
+        super().__init__(data)
 
         self.hdr_read_offset = 0x4
         self.app_name        = self.hdr_read(0xC)
@@ -95,7 +94,7 @@ class KIPView(GenericBinary):
         self.bss_offset       = self.base + self.hdr_read(4)
         self.bss_size         = self.hdr_read(4)
         
-        text_raw = self.raw.read(0x100, text_bin_size)
+        text_raw = self.raw.read(self.HDR_SIZE, text_bin_size)
         if compressed[self.TEXT]:
             self.log("Decompressing .text")
             text_raw = kip1_blz_decompress(text_raw)
@@ -103,7 +102,7 @@ class KIPView(GenericBinary):
             self.hdr_write(4, 0x24, self.page_align_up(self.text_size))
             self.hdr_write(4, 0x28, self.page_align_up(self.text_size))
 
-        rodata_raw = self.raw.read(0x100 + text_bin_size, rodata_bin_size)
+        rodata_raw = self.raw.read(self.HDR_SIZE + text_bin_size, rodata_bin_size)
         if compressed[self.RODATA]:
             self.log("Decompressing .rodata")
             rodata_raw = kip1_blz_decompress(rodata_raw)
@@ -112,7 +111,7 @@ class KIPView(GenericBinary):
             self.hdr_write(4, 0x38, self.page_align_up(self.rodata_size))
 
 
-        data_raw = self.raw.read(0x100 + text_bin_size + rodata_bin_size, data_bin_size)
+        data_raw = self.raw.read(self.HDR_SIZE + text_bin_size + rodata_bin_size, data_bin_size)
         if compressed[self.DATA]:
             self.log("Decompressing .data")
             data_raw = kip1_blz_decompress(data_raw)
