@@ -58,7 +58,7 @@ class GenericBinary(BinaryView):
     @classmethod
     def is_valid_for_data(cls, data):
         magic = data.read(0, 4).decode('ascii')
-        return True if magic == cls.MAGIC else False
+        return magic == cls.MAGIC
 
     def page_align_up(self, value):
         return (value + 0xfff) // 0x1000 * 0x1000
