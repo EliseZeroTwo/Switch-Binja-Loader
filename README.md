@@ -1,4 +1,4 @@
-# biNNja
+# Switch-Binja-Loader
 ### Author: **EliseZeroTwo**
 
 Work In Progress Binary Ninja Loader for common Nintendo Switch binaries
@@ -29,7 +29,7 @@ Binary Ninja v1200
 
 ## License
 
-This plugin is released under the [ISC license](https://github.com/EliseZeroTwo/biNNja/blob/master/LICENSE.txt)
+This plugin is released under the [ISC license](https://github.com/EliseZeroTwo/Switch-Binja-Loader/blob/master/LICENSE.txt)
 
 ## Metadata Version
 

@@ -76,6 +76,9 @@ class GenericBinary(BinaryView):
         
         return ret
     
+    def log(self, msg):
+        log_info(f'[Switch-Binja-Loader] {msg}')
+    
     def hdr_read(self, size, raw=False):
         self.hdr_read_offset += size
         return self.generic_read(self.hdr, size, self.hdr_read_offset - size, raw)
@@ -92,35 +95,35 @@ class GenericBinary(BinaryView):
         self.hdr = bytes(tmp)
 
     def init(self):
-        log_info(f'[biNNja] Loading {self.name} {self.app_name}')
+        self.log(f'Loading {self.name} {self.app_name}')
 
         self.platform = Architecture[self.ARCH].standalone_platform
 
         mod_offset = self.HDR_SIZE + self.generic_read(self.raw, 4, self.HDR_SIZE + 4)
 
         if self.generic_read(self.raw, 4, mod_offset, raw=True).decode('ascii') != 'MOD0':
-            log_info(f'[biNNja] MOD0(@ {hex(mod_offset)}) Magic invalid')
+            self.log(f'MOD0(@ {hex(mod_offset)}) Magic invalid')
         else:
             # TODO: Get Symbols
-            log_info('[biNNja] Parsing MOD0')
+            self.log('Parsing MOD0')
 
         offset = self.HDR_SIZE
-        log_info(f'[biNNja] Mapping .text {hex(self.text_offset)}-{hex(self.text_offset + self.text_size)}')
+        self.log(f'Mapping .text {hex(self.text_offset)}-{hex(self.text_offset + self.text_size)}')
         self.add_user_segment(self.text_offset, self.text_size, offset, self.text_size, SegmentFlag.SegmentExecutable | SegmentFlag.SegmentReadable)
         self.add_user_section('.text', self.text_offset, self.text_size, SectionSemantics.ReadOnlyCodeSectionSemantics)
         offset += self.text_size
 
-        log_info(f'[biNNja] Mapping .rodata {hex(self.rodata_offset)}-{hex(self.rodata_offset + self.text_size)}')
+        self.log(f'Mapping .rodata {hex(self.rodata_offset)}-{hex(self.rodata_offset + self.text_size)}')
         self.add_user_segment(self.rodata_offset, self.rodata_size, offset, self.rodata_size, SegmentFlag.SegmentReadable)
         self.add_user_section('.rodata', self.rodata_offset, self.rodata_size, SectionSemantics.ReadOnlyDataSectionSemantics)
         offset += self.rodata_size
 
-        log_info(f'[biNNja] Mapping .data {hex(self.data_offset)}-{hex(self.data_offset + self.data_size)}')
+        self.log(f'Mapping .data {hex(self.data_offset)}-{hex(self.data_offset + self.data_size)}')
         self.add_user_segment(self.data_offset, self.data_size, offset, self.data_size, SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable)
         self.add_user_section('.data', self.data_offset, self.data_size, SectionSemantics.ReadWriteDataSectionSemantics)
         offset += self.data_size
 
-        log_info(f'[biNNja] Mapping .bss {hex(self.bss_offset)}-{hex(self.bss_offset + self.bss_size)}')
+        self.log(f'Mapping .bss {hex(self.bss_offset)}-{hex(self.bss_offset + self.bss_size)}')
         self.add_user_segment(self.bss_offset, self.bss_size, offset, self.bss_size, SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable)
         self.add_user_section('.bss', self.bss_offset, self.bss_size, SectionSemantics.ReadWriteDataSectionSemantics)
         

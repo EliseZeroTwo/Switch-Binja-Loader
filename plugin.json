@@ -1,6 +1,6 @@
 {
 	"pluginmetadataversion" : 2,
-	"name": "biNNja",
+	"name": "Switch-Binja-Loader",
 	"type": ["binaryview", "helper"],
 	"api": ["python3"],
 	"description": "Loader for common Nintendo Switch binaries",

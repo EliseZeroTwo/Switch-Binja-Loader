@@ -97,7 +97,7 @@ class KIPView(GenericBinary):
         
         text_raw = self.raw.read(0x100, text_bin_size)
         if compressed[self.TEXT]:
-            log_info("[biNNja] Decompressing .text")
+            self.log("Decompressing .text")
             text_raw = kip1_blz_decompress(text_raw)
             flags &= 0b0011_1110
             self.hdr_write(4, 0x24, self.page_align_up(self.text_size))
@@ -105,7 +105,7 @@ class KIPView(GenericBinary):
 
         rodata_raw = self.raw.read(0x100 + text_bin_size, rodata_bin_size)
         if compressed[self.RODATA]:
-            log_info("[biNNja] Decompressing .rodata")
+            self.log("Decompressing .rodata")
             rodata_raw = kip1_blz_decompress(rodata_raw)
             flags &= 0b0011_1101
             self.hdr_write(4, 0x34, self.page_align_up(self.rodata_size))
@@ -114,7 +114,7 @@ class KIPView(GenericBinary):
 
         data_raw = self.raw.read(0x100 + text_bin_size + rodata_bin_size, data_bin_size)
         if compressed[self.DATA]:
-            log_info("[biNNja] Decompressing .data")
+            self.log("Decompressing .data")
             data_raw = kip1_blz_decompress(data_raw)
             flags &= 0b0011_1011
             self.hdr_write(4, 0x44, self.page_align_up(self.data_size))
