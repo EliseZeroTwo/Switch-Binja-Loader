@@ -24,6 +24,42 @@ ULONG  = 'Q'
 UNSIGNED_SIZE_MAP = { 1: BYTE, 2: USHORT, 4: UINT, 8: ULONG }
 SIGNED_SIZE_MAP   = { 1: CHAR, 2: SHORT, 4: INT, 8: LONG }
 
+# https://github.com/reswitched/loaders/blob/30a2f1f1d6c997a46cc4225c1f443c19d21fc66c/nxo64.py#L123
+(DT_NULL, DT_NEEDED, DT_PLTRELSZ, DT_PLTGOT, DT_HASH, DT_STRTAB, DT_SYMTAB, DT_RELA, DT_RELASZ,
+ DT_RELAENT, DT_STRSZ, DT_SYMENT, DT_INIT, DT_FINI, DT_SONAME, DT_RPATH, DT_SYMBOLIC, DT_REL,
+ DT_RELSZ, DT_RELENT, DT_PLTREL, DT_DEBUG, DT_TEXTREL, DT_JMPREL, DT_BIND_NOW, DT_INIT_ARRAY,
+ DT_FINI_ARRAY, DT_INIT_ARRAYSZ, DT_FINI_ARRAYSZ, DT_RUNPATH, DT_FLAGS) = range(31)
+DT_GNU_HASH = 0x6ffffef5
+DT_VERSYM = 0x6ffffff0
+DT_RELACOUNT = 0x6ffffff9
+DT_RELCOUNT = 0x6ffffffa
+DT_FLAGS_1 = 0x6ffffffb
+DT_VERDEF = 0x6ffffffc
+DT_VERDEFNUM = 0x6ffffffd
+
+STT_NOTYPE = 0
+STT_OBJECT = 1
+STT_FUNC = 2
+STT_SECTION = 3
+
+STB_LOCAL = 0
+STB_GLOBAL = 1
+STB_WEAK = 2
+
+R_ARM_ABS32 = 2
+R_ARM_TLS_DESC = 13
+R_ARM_GLOB_DAT = 21
+R_ARM_JUMP_SLOT = 22
+R_ARM_RELATIVE = 23
+
+R_AARCH64_ABS64 = 257
+R_AARCH64_GLOB_DAT = 1025
+R_AARCH64_JUMP_SLOT = 1026
+R_AARCH64_RELATIVE = 1027
+R_AARCH64_TLSDESC = 1031
+
+MULTIPLE_DTS = set([DT_NEEDED])
+
 class GenericBinary(BinaryView):
     MAGIC = b''
     HDR_SIZE = 0
@@ -34,9 +70,10 @@ class GenericBinary(BinaryView):
     BSS        = 3
     app_name = ''
     base = 0
+    dynamic = { x: [] for x in MULTIPLE_DTS }
     dynamic_offset = 0
-    eh_frame_hdr_start = 0
     eh_frame_hdr_size = 0
+    eh_frame_hdr_start = 0
     hdr = b''
     hdr_read_offset = 0
     text_offset = 0
@@ -47,6 +84,13 @@ class GenericBinary(BinaryView):
     data_size = 0
     bss_offset = 0
     bss_size = 0
+
+    def log(self, msg, error=False):
+        msg = f'[Switch-Binja-Loader] {msg}'
+        if not error:
+            log_info(msg)
+        else:
+            log_error(msg)
 
     def __init__(self, data):
         self.raw = data
@@ -85,12 +129,8 @@ class GenericBinary(BinaryView):
             return ret if times > 1 else ret[0]
         return ret
     
-    def log(self, msg, error=False):
-        msg = f'[Switch-Binja-Loader] {msg}'
-        if not error:
-            log_info(msg)
-        else:
-            log_error(msg)
+    def raw_read(self, size, offset, times=1, signed=False):
+        return self.generic_read(self.raw, size, offset, times=times, signed=signed)
 
     def hdr_read(self, size, times=1):
         self.hdr_read_offset += size
@@ -143,7 +183,9 @@ class GenericBinary(BinaryView):
         else:
             self.log('Parsing MOD0')
             dynamic_raw_offset = mod_offset + self.generic_read(self.raw, 4, mod_file_offset + 0x4)
+            dynamic_file_offset = self.HDR_SIZE + dynamic_raw_offset
             self.dynamic_offset = self.base + dynamic_raw_offset
+            dynamic_size = self.bss_offset - self.dynamic_offset
             if self.bss_offset == 0:
                 self.bss_offset = self.base + mod_offset + self.generic_read(self.raw, 4, mod_file_offset + 0x8, signed=True)
 
@@ -154,6 +196,21 @@ class GenericBinary(BinaryView):
             self.eh_frame_hdr_start = mod_offset + self.generic_read(self.raw, 4, mod_offset + 0x10)
             eh_frame_hdr_end = mod_offset + self.generic_read(self.raw, 4, mod_offset + 0x14)
             self.eh_frame_hdr_size = eh_frame_hdr_end - self.eh_frame_hdr_start
+
+            armv7 = self.raw_read(8, dynamic_file_offset) > 0xFFFFFFFF or self.raw_read(8, dynamic_file_offset + 0x100) > 0xFFFFFFFF
+            offset_size = 4 if armv7 else 8
+            for x in range(dynamic_size // 0x10):
+                tag, val = self.raw_read(offset_size, dynamic_file_offset, times=2)
+                if tag == DT_NULL:
+                    break
+
+                if tag in MULTIPLE_DTS:
+                    self.dynamic[tag].append(val)
+                else:
+                    self.dynamic[tag] = val
+            self.make_section('.dynamic', self.dynamic_offset, dynamic_size)
+
+
 
         self.bss_offset = self.bss_offset
         self.bss_size = self.page_align_up(self.bss_size)
