@@ -61,7 +61,7 @@ class KIPView(GenericBinary):
     name       = "KIP"
     long_name  = "Kernel Initialized Process"
     base = 0x7100000000
-    MAGIC      = "KIP1"
+    MAGIC      = b"KIP1"
     HDR_SIZE   = 0x100
     
 
@@ -98,35 +98,42 @@ class KIPView(GenericBinary):
         if compressed[self.TEXT]:
             self.log("Decompressing .text")
             text_raw = kip1_blz_decompress(text_raw)
-            flags &= 0b0011_1110
-            self.hdr_write(4, 0x24, self.page_align_up(self.text_size))
-            self.hdr_write(4, 0x28, self.page_align_up(self.text_size))
+
+        flags &= 0b0011_1110
+        text_raw = self.page_pad(text_raw)
+        self.text_size = len(text_raw)
+        self.hdr_write(4, 0x24, self.text_size)
+        self.hdr_write(4, 0x28, self.text_size)
 
         rodata_raw = self.raw.read(self.HDR_SIZE + text_bin_size, rodata_bin_size)
         if compressed[self.RODATA]:
             self.log("Decompressing .rodata")
             rodata_raw = kip1_blz_decompress(rodata_raw)
-            flags &= 0b0011_1101
-            self.hdr_write(4, 0x34, self.page_align_up(self.rodata_size))
-            self.hdr_write(4, 0x38, self.page_align_up(self.rodata_size))
+
+        flags &= 0b0011_1101
+        rodata_raw = self.page_pad(rodata_raw)
+        self.rodata_size = len(rodata_raw)
+        self.hdr_write(4, 0x34, self.rodata_size)
+        self.hdr_write(4, 0x38, self.rodata_size)
 
 
         data_raw = self.raw.read(self.HDR_SIZE + text_bin_size + rodata_bin_size, data_bin_size)
         if compressed[self.DATA]:
             self.log("Decompressing .data")
             data_raw = kip1_blz_decompress(data_raw)
-            flags &= 0b0011_1011
-            self.hdr_write(4, 0x44, self.page_align_up(self.data_size))
-            self.hdr_write(4, 0x48, self.page_align_up(self.data_size))
+        
+        flags &= 0b0011_1011
+        data_raw = self.page_pad(data_raw)
+        self.data_size = len(data_raw)
+        self.hdr_write(4, 0x44, self.data_size)
+        self.hdr_write(4, 0x48, self.data_size)
         
         self.hdr_write(1, 0x1F, flags)
 
-        binary  = self.hdr
-        binary += self.page_pad(text_raw)
-        binary += self.page_pad(rodata_raw)
-        binary += self.page_pad(data_raw)
-        binary += b'\x00' * self.bss_size
+        self.raw  = self.hdr
+        self.raw += text_raw
+        self.raw += rodata_raw
+        self.raw += data_raw
 
-        self.raw = binary
-        data.write(0, binary)
+        data.write(0, self.raw)
         BinaryView.__init__(self, file_metadata=data.file, parent_view=data)

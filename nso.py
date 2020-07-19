@@ -10,7 +10,7 @@ class NSOView(GenericBinary):
     name       = "NSO"
     long_name  = "Nintendo Static Object" # This is a guess at the name
     base = 0x7100000000
-    MAGIC      = "NSO0"
+    MAGIC      = b"NSO0"
     HDR_SIZE   = 0x100
     
 
@@ -43,42 +43,50 @@ class NSOView(GenericBinary):
         if compressed[self.TEXT]:
             self.log(f"Decompressing .text")
             text_raw = decompress(text_raw, uncompressed_size=self.text_size)
-            flags &= 0b0011_1110
-            self.hdr_write(4, 0x18, self.page_align_up(self.text_size))
-            self.hdr_write(4, 0x60, self.page_align_up(self.text_size))
+        
+        flags &= 0b0011_1110
+        text_raw = self.page_pad(text_raw)
+        self.text_size = len(text_raw)
+        self.hdr_write(4, 0x18, self.text_size)
+        self.hdr_write(4, 0x60, self.text_size)
         
         self.hdr_write(4, 0x10, offset)
-        offset += self.page_align_up(self.text_size)
+        offset += self.text_size
         
         rodata_raw = self.raw.read(rodata_file_offset, rodata_file_size)
         if compressed[self.RODATA]:
             self.log("Decompressing .rodata")
             rodata_raw = decompress(rodata_raw, uncompressed_size=self.rodata_size)
-            flags &= 0b0011_1101
-            self.hdr_write(4, 0x28, self.page_align_up(self.rodata_size))
-            self.hdr_write(4, 0x64, self.page_align_up(self.rodata_size))
+
+        flags &= 0b0011_1101
+        rodata_raw = self.page_pad(rodata_raw)
+        self.rodata_size = len(rodata_raw)
+        self.hdr_write(4, 0x28, self.rodata_size)
+        self.hdr_write(4, 0x64, self.rodata_size)
         
         self.hdr_write(4, 0x20, offset)
-        offset += self.page_align_up(self.rodata_size)
+        offset += self.rodata_size
         
         data_raw = self.raw.read(data_file_offset, data_file_size)
         if compressed[self.DATA]:
             self.log("Decompressing .data")
             data_raw = decompress(data_raw, uncompressed_size=self.data_size)
-            flags &= 0b0011_1011
-            self.hdr_write(4, 0x38, self.page_align_up(self.data_size))
-            self.hdr_write(4, 0x68, self.page_align_up(self.data_size))
+        
+        flags &= 0b0011_1011
+        data_raw = self.page_pad(data_raw)
+        self.data_size = len(data_raw)
+        self.hdr_write(4, 0x38, self.data_size)
+        self.hdr_write(4, 0x68, self.data_size)
         
         self.hdr_write(4, 0x30, offset)
-        offset += self.page_align_up(self.data_size)
+        offset += self.data_size
 
         self.hdr_write(1, 0xC, flags)
 
         binary  = self.hdr
-        binary += self.page_pad(text_raw)
-        binary += self.page_pad(rodata_raw)
-        binary += self.page_pad(data_raw)
-        binary += b'\x00' * self.page_align_up(self.bss_size)
+        binary += text_raw
+        binary += rodata_raw
+        binary += data_raw
 
         self.text_offset   += self.base
         self.rodata_offset += self.base

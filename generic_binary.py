@@ -25,7 +25,7 @@ UNSIGNED_SIZE_MAP = { 1: BYTE, 2: USHORT, 4: UINT, 8: ULONG }
 SIGNED_SIZE_MAP   = { 1: CHAR, 2: SHORT, 4: INT, 8: LONG }
 
 class GenericBinary(BinaryView):
-    MAGIC = ''
+    MAGIC = b''
     HDR_SIZE = 0
     ARCH = 'aarch64'
     TEXT       = 0
@@ -57,8 +57,7 @@ class GenericBinary(BinaryView):
 
     @classmethod
     def is_valid_for_data(cls, data):
-        magic = data.read(0, 4).decode('ascii')
-        return magic == cls.MAGIC
+        return data.read(0, 4) == cls.MAGIC
 
     def page_align_up(self, value):
         return (value + 0xfff) // 0x1000 * 0x1000
@@ -107,65 +106,60 @@ class GenericBinary(BinaryView):
         tmp[offset:offset + size] = list(b)
         self.hdr = bytes(tmp)
 
+    def make_section(self, name, offset, size):
+        FLAGS = { '.text': SectionSemantics.ReadOnlyCodeSectionSemantics, '.rodata': SectionSemantics.ReadOnlyDataSectionSemantics, \
+                  '.data': SectionSemantics.ReadWriteDataSectionSemantics, '.bss': SectionSemantics.ReadWriteDataSectionSemantics, \
+                  '.dynamic': SectionSemantics.ReadWriteDataSectionSemantics }
+        self.log(f"Making section {name} {hex(offset)}-{hex(offset + size)} (len: {hex(size)})")
+        self.add_user_section(name, offset, size, FLAGS[name])
+    
+    def make_segment(self, name, memory_offset, file_offset, size, empty=False):
+        FLAGS = { '.text': SegmentFlag.SegmentExecutable | SegmentFlag.SegmentReadable, '.rodata': SegmentFlag.SegmentReadable, \
+                  '.data': SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable, '.bss': SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable }
+        self.add_user_segment(memory_offset, size, file_offset, size if not empty else 0, FLAGS[name])
+        self.make_section(name, memory_offset, size)
+
     def init(self):
         self.log(f'Loading {self.name} {self.app_name}')
 
         self.platform = Architecture[self.ARCH].standalone_platform
 
-        mod_offset = self.HDR_SIZE + self.generic_read(self.raw, 4, self.HDR_SIZE + 4)
+        mod_offset = self.generic_read(self.raw, 4, self.HDR_SIZE + 4)
+        mod_file_offset = self.HDR_SIZE + mod_offset
 
         offset = self.HDR_SIZE
-        self.text_offset = self.page_align_down(self.text_offset)
-        self.text_size = self.page_align_up(self.text_size)
-        self.log(f'Mapping .text {hex(self.text_offset)}-{hex(self.text_offset + self.text_size)}')
-        self.add_user_segment(self.text_offset, self.text_size, offset, self.text_size, SegmentFlag.SegmentExecutable | SegmentFlag.SegmentReadable)
-        self.add_user_section('.text', self.text_offset, self.text_size, SectionSemantics.ReadOnlyCodeSectionSemantics)
+        self.make_segment('.text', self.text_offset, offset, self.text_size)
         offset += self.text_size
 
-        self.rodata_offset = self.page_align_down(self.rodata_offset)
-        self.rodata_size = self.page_align_up(self.rodata_size)
-        self.log(f'Mapping .rodata {hex(self.rodata_offset)}-{hex(self.rodata_offset + self.rodata_size)}')
-        self.add_user_segment(self.rodata_offset, self.rodata_size, offset, self.rodata_size, SegmentFlag.SegmentReadable)
-        self.add_user_section('.rodata', self.rodata_offset, self.rodata_size, SectionSemantics.ReadOnlyDataSectionSemantics)
+        self.make_segment('.rodata', self.rodata_offset, offset, self.rodata_size)
         offset += self.rodata_size
 
-        self.data_offset = self.page_align_down(self.data_offset)
-        self.data_size = self.page_align_up(self.data_size)
-        self.log(f'Mapping .data {hex(self.data_offset)}-{hex(self.data_offset + self.data_size)}')
-        self.add_user_segment(self.data_offset, self.data_size, offset, self.data_size, SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable)
-        self.add_user_section('.data', self.data_offset, self.data_size, SectionSemantics.ReadWriteDataSectionSemantics)
+        self.make_segment('.data', self.data_offset, offset, self.data_size)
         offset += self.data_size
 
 
-        if self.raw[mod_offset:mod_offset + 4].decode('ascii') != 'MOD0':
+        if self.raw[mod_file_offset:mod_file_offset + 4] != b'MOD0':
             self.log(f'MOD0(@ {hex(mod_offset)}) Magic invalid')
         else:
             self.log('Parsing MOD0')
-            self.dynamic_offset = self.generic_read(self.raw, 4, mod_offset + 0x4)
+            dynamic_raw_offset = mod_offset + self.generic_read(self.raw, 4, mod_file_offset + 0x4)
+            self.dynamic_offset = self.base + dynamic_raw_offset
             if self.bss_offset == 0:
-                self.bss_offset = self.base + mod_offset + self.generic_read(self.raw, 4, mod_offset + 0x8, signed=True)
-            
+                self.bss_offset = self.base + mod_offset + self.generic_read(self.raw, 4, mod_file_offset + 0x8, signed=True)
+
             if self.bss_size == 0:
-                self.bss_size = self.base + mod_offset + self.generic_read(self.raw, 4, mod_offset + 0xC, signed=True) - self.bss_offset
-                self.raw += b'\x00' * self.bss_size
+                bss_end = mod_offset + self.generic_read(self.raw, 4, mod_file_offset + 0xC, signed=True)
+                self.bss_size = bss_end - (self.bss_offset - self.base)
                 
             self.eh_frame_hdr_start = mod_offset + self.generic_read(self.raw, 4, mod_offset + 0x10)
-            eh_frame_hdr_end = mod_offset +self.generic_read(self.raw, 4, mod_offset + 0x14)
-            self.eh_frame_hdr_size = self.eh_frame_hdr_start - eh_frame_hdr_end
+            eh_frame_hdr_end = mod_offset + self.generic_read(self.raw, 4, mod_offset + 0x14)
+            self.eh_frame_hdr_size = eh_frame_hdr_end - self.eh_frame_hdr_start
 
-        self.bss_offset = self.page_align_down(self.bss_offset)
+        self.bss_offset = self.bss_offset
         self.bss_size = self.page_align_up(self.bss_size)
-        self.log(f'Mapping .bss {hex(self.bss_offset)}-{hex(self.bss_offset + self.bss_size)}')
-        self.add_user_segment(self.bss_offset, self.bss_size, offset, self.bss_size, SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable)
-        self.add_user_section('.bss', self.bss_offset, self.bss_size, SectionSemantics.ReadWriteDataSectionSemantics)
+        self.make_segment('.bss', self.bss_offset, 0, self.bss_size, empty=True)
         
         self.define_auto_symbol(Symbol(SymbolType.FunctionSymbol, self.text_offset, "_start"))
         self.add_entry_point(self.text_offset)
 
         return True
-
-
-        
-
-
-
