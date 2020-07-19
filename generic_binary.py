@@ -72,6 +72,7 @@ class GenericBinary(BinaryView):
     base = 0
     dynamic = { x: [] for x in MULTIPLE_DTS }
     dynamic_offset = 0
+    dynstr = '\x00'
     eh_frame_hdr_size = 0
     eh_frame_hdr_start = 0
     hdr = b''
@@ -147,17 +148,18 @@ class GenericBinary(BinaryView):
         self.hdr = bytes(tmp)
 
     def make_section(self, name, offset, size):
-        FLAGS = { '.text': SectionSemantics.ReadOnlyCodeSectionSemantics, '.rodata': SectionSemantics.ReadOnlyDataSectionSemantics, \
-                  '.data': SectionSemantics.ReadWriteDataSectionSemantics, '.bss': SectionSemantics.ReadWriteDataSectionSemantics, \
-                  '.dynamic': SectionSemantics.ReadWriteDataSectionSemantics }
+        FLAGS = { '.text': SectionSemantics.ReadOnlyCodeSectionSemantics, '.rodata': SectionSemantics.ReadOnlyDataSectionSemantics }
         self.log(f"Making section {name} {hex(offset)}-{hex(offset + size)} (len: {hex(size)})")
-        self.add_user_section(name, offset, size, FLAGS[name])
+        self.add_user_section(name, offset, size, FLAGS[name] if name in FLAGS else SectionSemantics.ReadWriteDataSectionSemantics)
     
     def make_segment(self, name, memory_offset, file_offset, size, empty=False):
         FLAGS = { '.text': SegmentFlag.SegmentExecutable | SegmentFlag.SegmentReadable, '.rodata': SegmentFlag.SegmentReadable, \
                   '.data': SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable, '.bss': SegmentFlag.SegmentReadable | SegmentFlag.SegmentWritable }
         self.add_user_segment(memory_offset, size, file_offset, size if not empty else 0, FLAGS[name])
         self.make_section(name, memory_offset, size)
+    
+    def get_dynstr(self, o):
+        return self.dynstr[o:self.dynstr.index('\x00', o)]
 
     def init(self):
         self.log(f'Loading {self.name} {self.app_name}')
@@ -185,10 +187,10 @@ class GenericBinary(BinaryView):
             dynamic_raw_offset = mod_offset + self.generic_read(self.raw, 4, mod_file_offset + 0x4)
             dynamic_file_offset = self.HDR_SIZE + dynamic_raw_offset
             self.dynamic_offset = self.base + dynamic_raw_offset
-            dynamic_size = self.bss_offset - self.dynamic_offset
             if self.bss_offset == 0:
                 self.bss_offset = self.base + mod_offset + self.generic_read(self.raw, 4, mod_file_offset + 0x8, signed=True)
 
+            dynamic_size = self.bss_offset - self.dynamic_offset
             if self.bss_size == 0:
                 bss_end = mod_offset + self.generic_read(self.raw, 4, mod_file_offset + 0xC, signed=True)
                 self.bss_size = bss_end - (self.bss_offset - self.base)
@@ -199,8 +201,8 @@ class GenericBinary(BinaryView):
 
             armv7 = self.raw_read(8, dynamic_file_offset) > 0xFFFFFFFF or self.raw_read(8, dynamic_file_offset + 0x100) > 0xFFFFFFFF
             offset_size = 4 if armv7 else 8
-            for x in range(dynamic_size // 0x10):
-                tag, val = self.raw_read(offset_size, dynamic_file_offset, times=2)
+            for index in range(dynamic_size // 0x10):
+                tag, val = self.raw_read(offset_size, dynamic_file_offset + (offset_size * index) * 2, times=2)
                 if tag == DT_NULL:
                     break
 
@@ -210,8 +212,23 @@ class GenericBinary(BinaryView):
                     self.dynamic[tag] = val
             self.make_section('.dynamic', self.dynamic_offset, dynamic_size)
 
+            if DT_STRTAB in self.dynamic and DT_STRSZ in self.dynamic:
+                self.log("Reading .dynstr")
+                self.dynstr = self.raw_read(self.dynamic[DT_STRSZ], self.HDR_SIZE + self.dynamic[DT_STRTAB])
 
+            for start_key, size_key, name in [
+                (DT_STRTAB, DT_STRSZ, '.dynstr'),
+                (DT_INIT_ARRAY, DT_INIT_ARRAYSZ, '.init_array'),
+                (DT_FINI_ARRAY, DT_FINI_ARRAYSZ, '.fini_array'),
+                (DT_RELA, DT_RELASZ, '.rela.dyn'),
+                (DT_REL, DT_RELSZ, '.rel.dyn'),
+                (DT_JMPREL, DT_PLTRELSZ, ('.rel.plt' if armv7 else '.rela.plt')),
+            ]:
+                if start_key in self.dynamic and size_key in self.dynamic:
+                    self.make_section(name, self.base + self.dynamic[start_key], self.dynamic[size_key])
 
+            needed = [self.get_dynstr(i) for i in self.dynamic[DT_NEEDED]]
+            
         self.bss_offset = self.bss_offset
         self.bss_size = self.page_align_up(self.bss_size)
         self.make_segment('.bss', self.bss_offset, 0, self.bss_size, empty=True)
