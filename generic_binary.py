@@ -379,7 +379,6 @@ class GenericBinary(BinaryView):
                     self.define_auto_symbol(Symbol(SymbolType.DataSymbol, symbol.resolved, decoded_name))
             elif symbol.name:
                 demangled = get_qualified_name(demangle_gnu3(Architecture[self.ARCH], symbol.name.decode('ascii'))[1])
-                self.log(symbol.name.decode('ascii'))
                 self.define_auto_symbol(Symbol(SymbolType.ImportedFunctionSymbol, undef_ea, demangled))
                 undef_ea += 8
 
