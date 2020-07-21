@@ -1,6 +1,7 @@
 from binaryninja.architecture   import Architecture
 from binaryninja.binaryview     import BinaryView, BinaryReader, BinaryWriter
-from binaryninja.types          import Symbol
+from binaryninja.demangle       import demangle_gnu3, get_qualified_name
+from binaryninja.types          import Symbol, Type
 from binaryninja.enums          import Endianness, SegmentFlag, SectionSemantics, SymbolType
 from binaryninja.log            import log_error, log_info
 from struct                     import *
@@ -60,6 +61,22 @@ R_AARCH64_TLSDESC = 1031
 
 MULTIPLE_DTS = set([DT_NEEDED])
 
+# https://github.com/reswitched/loaders/blob/30a2f1f1d6c997a46cc4225c1f443c19d21fc66c/nxo64.py#249
+class ElfSym(object):
+    def __init__(self, name, info, other, shndx, value, size):
+        self.name = name
+        self.shndx = shndx
+        self.value = value
+        self.size = size
+
+        self.vis = other & 3
+        self.type = info & 0xF
+        self.bind = info >> 4
+
+    def __repr__(self):
+        return 'Sym(name=%r, shndx=0x%X, value=0x%X, size=0x%X, vis=%r, type=%r, bind=%r)' % (
+            self.name, self.shndx, self.value, self.size, self.vis, self.type, self.bind)
+
 class GenericBinary(BinaryView):
     MAGIC = b''
     HDR_SIZE = 0
@@ -70,22 +87,24 @@ class GenericBinary(BinaryView):
     BSS        = 3
     app_name = ''
     base = 0
+    bss_offset = 0
+    bss_size = 0
+    data_offset = 0
+    data_size = 0
     dynamic = { x: [] for x in MULTIPLE_DTS }
     dynamic_offset = 0
-    dynstr = '\x00'
+    dynstr = b'\x00'
     eh_frame_hdr_size = 0
     eh_frame_hdr_start = 0
     hdr = b''
     hdr_read_offset = 0
-    text_offset = 0
-    text_size = 0
+    plt_entries = []
     reader = BinaryReader
+    relocations = []
     rodata_offset = 0
     rodata_size = 0
-    data_offset = 0
-    data_size = 0
-    bss_offset = 0
-    bss_size = 0
+    text_offset = 0
+    text_size = 0
     writer = BinaryWriter
 
     def log(self, msg, error=False):
@@ -131,6 +150,33 @@ class GenericBinary(BinaryView):
     
     def get_dynstr(self, o):
         return self.dynstr[o:self.dynstr.index(b'\x00', o)]
+    
+    def process_relocations(self, offset, size):
+        locations = set()
+        self.reader.seek(self.HDR_SIZE + offset)
+        relocation_size = 8 if self.armv7 else 0x18
+        for x in range(size // relocation_size):
+            if self.armv7:
+                offset = self.reader.read32()
+                info = self.reader.read32()
+                addend = None
+                r_type = info & 0xFF
+                r_sym = info >> 8
+            else:
+                offset = self.reader.read64()
+                info = self.reader.read64()
+                addend = self.up_signed(self.reader.read(8), 8)
+                r_type = info & 0xFFFFFFFF
+                r_sym = info >> 32
+            
+            sym = self.syms[r_sym] if r_sym != 0 else None
+
+            if r_type != R_AARCH64_TLSDESC and r_type != R_ARM_TLS_DESC:
+                locations.add(offset)
+            self.relocations.append((offset, r_type, sym, addend))
+        return locations
+
+
 
     def init(self):
         self.log(f'Loading {self.name} {self.app_name}')
@@ -171,17 +217,25 @@ class GenericBinary(BinaryView):
             self.eh_frame_hdr_start = mod_offset + self.up_signed(self.reader.read(4), 4)
             eh_frame_hdr_end = mod_offset + self.up_signed(self.reader.read(4), 4)
             self.eh_frame_hdr_size = eh_frame_hdr_end - self.eh_frame_hdr_start
+            self.module_offset = mod_offset + self.up_signed(self.reader.read(4), 4)
+
+            libnx = False
+            if self.reader.read(4) == b'LNY0':
+                libnx = True
+                libnx_got_start = mod_offset + self.up_signed(self.reader.read(4), 4)
+                libnx_got_end   = mod_offset + self.up_signed(self.reader.read(4), 4)
+                self.make_section('.got', self.base + libnx_got_start, libnx_got_end - libnx_got_start)
 
             self.reader.seek(dynamic_file_offset)
             tag1 = self.reader.read64()
-            self.reader.seek_relative(8)
+            self.reader.seek(dynamic_file_offset + 0x10)
             tag2 = self.reader.read64()
             self.reader.seek(dynamic_file_offset)
-            armv7 = tag1 > 0xFFFFFFFF or tag2 > 0xFFFFFFFF
-
+            self.armv7 = tag1 > 0xFFFFFFFF or tag2 > 0xFFFFFFFF
+            offset_size = 4 if self.armv7 else 8
             self.reader.seek(dynamic_file_offset)
             for index in range(dynamic_size // 0x10):
-                if armv7:
+                if self.armv7:
                     tag = self.reader.read32()
                     val = self.reader.read32()
                 else:
@@ -208,16 +262,154 @@ class GenericBinary(BinaryView):
                 (DT_FINI_ARRAY, DT_FINI_ARRAYSZ, '.fini_array'),
                 (DT_RELA, DT_RELASZ, '.rela.dyn'),
                 (DT_REL, DT_RELSZ, '.rel.dyn'),
-                (DT_JMPREL, DT_PLTRELSZ, ('.rel.plt' if armv7 else '.rela.plt')),
+                (DT_JMPREL, DT_PLTRELSZ, ('.rel.plt' if self.armv7 else '.rela.plt')),
             ]:
                 if start_key in self.dynamic and size_key in self.dynamic:
                     self.make_section(name, self.base + self.dynamic[start_key], self.dynamic[size_key])
+            
             needed = [self.get_dynstr(i) for i in self.dynamic[DT_NEEDED]]
             
+            self.syms = [] # symbols, symbols is already an attribute for BinaryView
+            if DT_SYMTAB in self.dynamic and DT_STRTAB in self.dynamic:
+                self.reader.seek(self.HDR_SIZE + self.dynamic[DT_SYMTAB])
+                while True:
+                    if self.dynamic[DT_SYMTAB] < self.dynamic[DT_STRTAB] and self.reader.offset - self.HDR_SIZE >= self.dynamic[DT_STRTAB]:
+                        break
+
+                    if self.armv7:
+                        st_name = self.reader.read32()
+                        st_value = self.reader.read32()
+                        st_size = self.reader.read32()
+                        st_info = self.reader.read8()
+                        st_other = self.reader.read8()
+                        st_shndx = self.reader.read16()
+                    else:
+                        st_name = self.reader.read32()
+                        st_info = self.reader.read8()
+                        st_other = self.reader.read8()
+                        st_shndx = self.reader.read16()
+                        st_value = self.reader.read64()
+                        st_size = self.reader.read64()
+                    
+                    if st_name > len(self.dynstr):
+                        break
+                    self.syms.append(ElfSym(self.get_dynstr(st_name), st_info, st_other, st_shndx, st_value, st_size))
+                self.make_section('.dynsym', self.base + self.dynamic[DT_SYMTAB], (self.reader.offset - self.HDR_SIZE) - self.dynamic[DT_SYMTAB])
+            
+            locations = set()
+            plt_got_end = None
+            if DT_REL in self.dynamic and DT_RELSZ in self.dynamic:
+                locations |= self.process_relocations(self.dynamic[DT_REL], self.dynamic[DT_RELSZ])
+            
+            if DT_RELA in self.dynamic and DT_RELASZ in self.dynamic:
+                locations |= self.process_relocations(self.dynamic[DT_RELA], self.dynamic[DT_RELASZ])
+            
+            if DT_JMPREL in self.dynamic and DT_PLTRELSZ in self.dynamic:
+                plt_locations = self.process_relocations(self.dynamic[DT_JMPREL], self.dynamic[DT_PLTRELSZ])
+                locations |= plt_locations
+
+                plt_got_start = min(plt_locations)
+                plt_got_end = max(plt_locations) + offset_size
+                if DT_PLTGOT in self.dynamic:
+                    self.make_section('.got.plt', self.base + self.dynamic[DT_PLTGOT], plt_got_end - plt_got_start)
+
+                if not self.armv7:
+                    self.reader.seek(self.HDR_SIZE)
+                    text = self.reader.read(self.text_size)
+                    last = 12
+                    while True: # This block was straight copy pasted from https://github.com/reswitched/loaders/blob/30a2f1f1d6c997a46cc4225c1f443c19d21fc66c/nxo64.py#L406
+                        pos = text.find(pack('<I', 0xD61F0220), last)
+                        if pos == -1: break
+                        last = pos+1
+                        if (pos % 4) != 0: continue
+                        off = pos - 12
+                        a, b, c, d = unpack_from('<IIII', text, off)
+                        if d == 0xD61F0220 and (a & 0x9f00001f) == 0x90000010 and (b & 0xffe003ff) == 0xf9400211:
+                            base = off & ~0xFFF
+                            immhi = (a >> 5) & 0x7ffff
+                            immlo = (a >> 29) & 3
+                            paddr = base + ((immlo << 12) | (immhi << 14))
+                            poff = ((b >> 10) & 0xfff) << 3
+                            target = paddr + poff
+                            if plt_got_start <= target < plt_got_end:
+                                self.plt_entries.append((off, target))
+                    text = b''
+                    plt_start = min(self.plt_entries)[0]
+                    plt_end = max(self.plt_entries)[0] + 0x10
+                    self.make_section('.plt', self.base + plt_start, plt_end - plt_start)
+                
+                if not libnx:
+                    if plt_got_end is not None:
+                        got_ok = False
+                        got_end = plt_got_end + offset_size
+                        while got_end in locations and (DT_INIT_ARRAY not in self.dynamic or got_end < self.dynamic[DT_INIT_ARRAY]):
+                            got_ok = True
+                            got_end += offset_size
+
+                        if got_ok:
+                            self.make_section('.got', self.base + plt_got_end, got_end - plt_got_end)
+                
         self.bss_offset = self.bss_offset
         self.bss_size = self.page_align_up(self.bss_size)
         self.make_segment('.bss', self.base + self.bss_offset, 0, self.bss_size, empty=True)
         
+        undefined_count = 0
+        for sym in self.syms:
+            if not sym.shndx and sym.name:
+                undefined_count += 1
+        last_ea = self.base + max([self.text_offset + self.text_size, self.rodata_offset + self.rodata_size, self.data_offset + self.data_size, self.bss_offset + self.bss_offset])
+        undef_ea = ((last_ea + 0xFFF) & ~0xFFF) + 8
+        for idx, symbol in enumerate(self.syms):
+            if symbol.shndx and symbol.name:
+                symbol.resolved = self.base + symbol.value
+                decoded_name = symbol.name.decode('ascii')
+                if symbol.name[0:2] == b'_Z':
+                    demangled_type, demangled_name = demangle_gnu3(Architecture[self.ARCH], decoded_name)
+                    decoded_name = get_qualified_name(demangled_name)
+                else:
+                    demangled_type = None
+           
+                if symbol.type == STT_FUNC:
+                    self.create_user_function(symbol.resolved)
+                    self.define_user_symbol(Symbol(SymbolType.FunctionSymbol, symbol.resolved, decoded_name))
+                    
+                    if demangled_type is not None:
+                        self.get_function_at(symbol.resolved).set_user_type(demangled_type)
+                else:
+                    self.define_auto_symbol(Symbol(SymbolType.DataSymbol, symbol.resolved, decoded_name))
+            elif symbol.name:
+                demangled = get_qualified_name(demangle_gnu3(Architecture[self.ARCH], symbol.name.decode('ascii'))[1])
+                self.log(symbol.name.decode('ascii'))
+                self.define_auto_symbol(Symbol(SymbolType.ImportedFunctionSymbol, undef_ea, demangled))
+                undef_ea += 8
+
+        got_name_lookup = {}
+        for offset, r_type, symbol, addend in self.relocations:
+            target = self.base + offset
+            if r_type in (R_ARM_GLOB_DAT, R_ARM_JUMP_SLOT, R_ARM_ABS32):
+                if symbol:
+                    self.writer.seek(target)
+                    self.writer.write32(symbol.resolved)
+                elif r_type == R_ARM_RELATIVE:
+                    self.reader.seek(target)
+                    self.writer.seek(target)
+                    self.writer.write32(self.base + self.reader.read32())
+                elif r_type in (R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_ABS64):
+                    self.writer.seek(target)
+                    self.writer.write64(symbol.resolved + addend)
+                    if addend == 0:
+                        got_name_lookup[offset] = symbol.name
+                elif r_type == R_AARCH64_RELATIVE:
+                    self.writer.seek(target)
+                    self.writer.write64(self.base + addend)
+        
+        for func, target in self.plt_entries:
+            if target in got_name_lookup:
+                addr = self.base + func
+                demangled = get_qualified_name(demangle_gnu3(Architecture[self.ARCH], got_name_lookup[target].decode('ascii'))[1])
+                self.define_auto_symbol(Symbol(SymbolType.FunctionSymbol, addr, demangled))
+
+
         self.define_auto_symbol(Symbol(SymbolType.FunctionSymbol, self.base + self.text_offset, "_start"))
         self.add_entry_point(self.base + self.text_offset)
 
