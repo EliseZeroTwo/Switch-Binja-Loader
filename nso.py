@@ -9,7 +9,7 @@ from struct import *
 class NSOView(GenericBinary):
     name       = "NSO"
     long_name  = "Nintendo Static Object" # This is a guess at the name
-    base = 0x7100000000
+    base       = 0x7100000000
     MAGIC      = b"NSO0"
     HDR_SIZE   = 0x100
     
@@ -110,6 +110,10 @@ class NSOView(GenericBinary):
         self.raw += text_raw
         self.raw += rodata_raw
         self.raw += data_raw
+
+        text_raw = b''
+        rodata_raw = b''
+        data_raw = b''
 
         data.write(0, self.raw)
         BinaryView.__init__(self, file_metadata=data.file, parent_view=data)
