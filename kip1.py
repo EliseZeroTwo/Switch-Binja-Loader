@@ -61,6 +61,7 @@ class KIPView(GenericBinary):
     name       = "KIP"
     long_name  = "Kernel Initialized Process"
     base = 0x7100000000
+    entrypoint = base
     MAGIC      = b"KIP1"
     HDR_SIZE   = 0x100
     

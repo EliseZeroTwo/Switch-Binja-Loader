@@ -3,6 +3,12 @@
 
 Work In Progress Binary Ninja Loader for common Nintendo Switch binaries
 
+![Image demoing SMO in Binja](https://github.com/EliseZeroTwo/Switch-Binja-Loader/blob/master/images/home.png)
+
+### Currently Supports
+- NSO
+- KIP
+
 ## Credits
 - [ReSwitched for their nxo64.py loader](https://github.com/reswitched/loaders/blob/master/nxo64.py)
 - [Adubbz for his Ghidra Switch Loader](https://github.com/Adubbz/Ghidra-Switch-Loader)

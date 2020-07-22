@@ -91,9 +91,10 @@ class GenericBinary(BinaryView):
     bss_size = 0
     data_offset = 0
     data_size = 0
-    dynamic = { x: [] for x in MULTIPLE_DTS }
+    dynamic = { }
     dynamic_offset = 0
     dynstr = b'\x00'
+    entrypoint = 0
     eh_frame_hdr_size = 0
     eh_frame_hdr_start = 0
     hdr = b''
@@ -175,8 +176,16 @@ class GenericBinary(BinaryView):
                 locations.add(offset)
             self.relocations.append((offset, r_type, sym, addend))
         return locations
+    
+    def try_unmangle(self, value):
+        if value[:2] != b'_Z':
+            return (None, value)
 
-
+        decoded_name = value.decode('ascii')
+        demangled_type, demangled_name = demangle_gnu3(Architecture[self.ARCH], decoded_name)
+        decoded_name = get_qualified_name(demangled_name)
+        return (demangled_type, decoded_name)
+        
 
     def init(self):
         self.log(f'Loading {self.name} {self.app_name}')
@@ -234,6 +243,7 @@ class GenericBinary(BinaryView):
             self.armv7 = tag1 > 0xFFFFFFFF or tag2 > 0xFFFFFFFF
             offset_size = 4 if self.armv7 else 8
             self.reader.seek(dynamic_file_offset)
+            self.dynamic = { x: [] for x in MULTIPLE_DTS }
             for index in range(dynamic_size // 0x10):
                 if self.armv7:
                     tag = self.reader.read32()
@@ -293,6 +303,7 @@ class GenericBinary(BinaryView):
                     
                     if st_name > len(self.dynstr):
                         break
+                    
                     self.syms.append(ElfSym(self.get_dynstr(st_name), st_info, st_other, st_shndx, st_value, st_size))
                 self.make_section('.dynsym', self.base + self.dynamic[DT_SYMTAB], (self.reader.offset - self.HDR_SIZE) - self.dynamic[DT_SYMTAB])
             
@@ -348,6 +359,9 @@ class GenericBinary(BinaryView):
 
                         if got_ok:
                             self.make_section('.got', self.base + plt_got_end, got_end - plt_got_end)
+            else:
+                plt_got_start = 0
+                plt_got_end = 0
                 
         self.bss_offset = self.bss_offset
         self.bss_size = self.page_align_up(self.bss_size)
@@ -357,59 +371,81 @@ class GenericBinary(BinaryView):
         for sym in self.syms:
             if not sym.shndx and sym.name:
                 undefined_count += 1
-        last_ea = self.base + max([self.text_offset + self.text_size, self.rodata_offset + self.rodata_size, self.data_offset + self.data_size, self.bss_offset + self.bss_offset])
-        undef_ea = ((last_ea + 0xFFF) & ~0xFFF) + 8
+        last_ea = max([self.base + seg.end for seg in self.segments])
+
+        undef_ea = self.page_align_up(last_ea) + 8
+        undef_offset = self.base + plt_got_start
         for idx, symbol in enumerate(self.syms):
-            if symbol.shndx and symbol.name:
+            if symbol.name:
                 symbol.resolved = self.base + symbol.value
-                decoded_name = symbol.name.decode('ascii')
-                if symbol.name[0:2] == b'_Z':
-                    demangled_type, demangled_name = demangle_gnu3(Architecture[self.ARCH], decoded_name)
-                    decoded_name = get_qualified_name(demangled_name)
+                decoded_type, decoded_name = self.try_unmangle(symbol.name)
+                
+                if symbol.shndx:
+                    if symbol.type == STT_FUNC:
+                        self.create_user_function(symbol.resolved)
+                        self.define_user_symbol(Symbol(SymbolType.FunctionSymbol, symbol.resolved, decoded_name))
+                        
+                        if decoded_type is not None:
+                            self.get_function_at(symbol.resolved).set_user_type(decoded_type)
+                    else:
+                        if decoded_type is not None:
+                            self.define_data_var(symbol.resolved, decoded_type)
+                        self.define_user_symbol(Symbol(SymbolType.DataSymbol, symbol.resolved, decoded_name))
                 else:
-                    demangled_type = None
-           
-                if symbol.type == STT_FUNC:
-                    self.create_user_function(symbol.resolved)
-                    self.define_user_symbol(Symbol(SymbolType.FunctionSymbol, symbol.resolved, decoded_name))
-                    
-                    if demangled_type is not None:
-                        self.get_function_at(symbol.resolved).set_user_type(demangled_type)
-                else:
-                    self.define_auto_symbol(Symbol(SymbolType.DataSymbol, symbol.resolved, decoded_name))
-            elif symbol.name:
-                demangled = get_qualified_name(demangle_gnu3(Architecture[self.ARCH], symbol.name.decode('ascii'))[1])
-                self.define_auto_symbol(Symbol(SymbolType.ImportedFunctionSymbol, undef_ea, demangled))
-                undef_ea += 8
+                    self.define_user_symbol(Symbol(SymbolType.ImportedFunctionSymbol, undef_ea, decoded_name))
+                    undef_ea += offset_size
 
         got_name_lookup = {}
         for offset, r_type, symbol, addend in self.relocations:
             target = self.base + offset
-            if r_type in (R_ARM_GLOB_DAT, R_ARM_JUMP_SLOT, R_ARM_ABS32):
+            if symbol != None:            
+                decoded_type, decoded_name = self.try_unmangle(symbol.name)
+                if decoded_type != None:
+                    self.define_data_var(target, Type.pointer(Architecture[self.ARCH], decoded_type))
+                self.define_auto_symbol(Symbol(SymbolType.DataSymbol, target, decoded_name))
+            else:
+                decoded_type = decoded_name = None
+            
+            packed = None
+            offset_raw = None
+            if r_type in [R_ARM_GLOB_DAT, R_ARM_JUMP_SLOT, R_ARM_ABS32]:
                 if symbol:
-                    self.writer.seek(target)
-                    self.writer.write32(symbol.resolved)
-                elif r_type == R_ARM_RELATIVE:
-                    self.reader.seek(target)
-                    self.writer.seek(target)
-                    self.writer.write32(self.base + self.reader.read32())
-                elif r_type in (R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_ABS64):
-                    self.writer.seek(target)
-                    self.writer.write64(symbol.resolved + addend)
-                    if addend == 0:
-                        got_name_lookup[offset] = symbol.name
-                elif r_type == R_AARCH64_RELATIVE:
-                    self.writer.seek(target)
-                    self.writer.write64(self.base + addend)
+                    offset_raw = symbol.resolved
+                    packed = pack(LE + UNSIGNED_SIZE_MAP[4], offset_raw)
+            elif r_type == R_ARM_RELATIVE:
+                self.reader.seek(target)
+                offset_raw = self.base + self.reader.read32()
+                packed = pack(LE + UNSIGNED_SIZE_MAP[4], offset_raw)
+            elif r_type in [R_AARCH64_GLOB_DAT, R_AARCH64_JUMP_SLOT, R_AARCH64_ABS64]:
+                offset_raw = symbol.resolved + addend
+                packed = pack(LE + UNSIGNED_SIZE_MAP[8], offset_raw)
+                if addend == 0:
+                    got_name_lookup[offset] = symbol.name
+            elif r_type == R_AARCH64_RELATIVE:
+                offset_raw = self.base + addend
+                packed = pack(LE + UNSIGNED_SIZE_MAP[8], offset_raw)
+            
+            if packed is not None:
+                if offset_raw != self.base and offset_raw != self.base + 0x10 and offset_raw < self.base + self.text_offset + self.text_size:
+                    self.create_user_function(offset_raw)
+                    if decoded_type is not None:
+                        self.get_function_at(offset_raw).set_user_type(decoded_type)
+                    self.write(target, packed)
+
         
         for func, target in self.plt_entries:
             if target in got_name_lookup:
                 addr = self.base + func
-                demangled = get_qualified_name(demangle_gnu3(Architecture[self.ARCH], got_name_lookup[target].decode('ascii'))[1])
-                self.define_auto_symbol(Symbol(SymbolType.FunctionSymbol, addr, demangled))
+                decoded_type, decoded_name = self.try_unmangle(got_name_lookup[target])
+                self.define_user_symbol(Symbol(SymbolType.ImportedFunctionSymbol, addr, decoded_name))
 
-
-        self.define_auto_symbol(Symbol(SymbolType.FunctionSymbol, self.base + self.text_offset, "_start"))
-        self.add_entry_point(self.base + self.text_offset)
+        # Try to find entrypoint if not already set
+        if self.entrypoint == 0:
+            for sym in self.syms:
+                if sym.name == b'_init':
+                    self.entrypoint = sym.resolved
+                    break
+        if self.entrypoint != 0:
+            self.add_entry_point(self.entrypoint)
 
         return True
