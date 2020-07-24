@@ -8,6 +8,7 @@ Work In Progress Binary Ninja Loader for common Nintendo Switch binaries
 ### Currently Supports
 - NSO
 - KIP
+- NRO
 
 ## Credits
 - [ReSwitched for their nxo64.py loader](https://github.com/reswitched/loaders/blob/master/nxo64.py)
