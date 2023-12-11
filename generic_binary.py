@@ -126,6 +126,9 @@ class GenericBinary(BinaryView):
     def is_valid_for_data(cls, data):
         return data.read(0, 4) == cls.MAGIC
 
+    def perform_get_address_size(self):
+        return self.arch.address_size
+
     def page_align_up(self, value):
         return (value + 0xfff) // 0x1000 * 0x1000
     
